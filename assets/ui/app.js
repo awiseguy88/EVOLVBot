@@ -8,6 +8,7 @@ const state = {
   evolutionCount: 0, mounted: new Map(), // name -> el
   shellReloadTimer: null, thinkingEl: null,
   evoAll: [], evoRevealed: 0, // ledger source of truth + revealed-beyond-cap count
+  creations: [], creationHistory: [], libraryTab: 'library',
 };
 
 /* ---------------- update banner ---------------- */
@@ -112,10 +113,14 @@ function handle(ev) {
     }
     case 'plugin:log': console.log('[plugin]', (ev.payload || {}).text); break;
     case 'shell:reload': {
+      // LOOP GUARD — a storm of reload events (post-update seeding, a dream
+      // rewriting the shell, rollback) must recompile the page ONCE, not
+      // bounce it forever. Suppress anything within 10s of the last reload.
+      if (shellReloadGuarded()) { console.log('[evolv] shell reload suppressed by loop guard'); break; }
       $('#recompile-path').textContent = (ev.payload || {}).reason || 'the organism is rewriting its own shell…';
       $('#recompile').classList.add('show');
       clearTimeout(state.shellReloadTimer);
-      state.shellReloadTimer = setTimeout(() => location.reload(), 900);
+      state.shellReloadTimer = setTimeout(() => { markShellReloaded(); location.reload(); }, 900);
       break;
     }
     case 'update:available': {
@@ -132,10 +137,23 @@ function handle(ev) {
   }
 }
 
+/* ---------------- shell reload loop guard ----------------
+A recompile reloads the page; if the source of the reload (a seed, a dream,
+an update storm) keeps firing after the reload, the page would bounce
+forever on "recompiling shell". The guard: a sessionStorage timestamp set
+the instant we decide to reload — survives the reload itself — suppresses
+any further recompile overlay for 10 seconds. One morph, one reload. */
+function shellReloadGuarded() {
+  const last = +(sessionStorage.getItem('evolv.reloadAt') || 0);
+  return Date.now() - last < 10000;
+}
+function markShellReloaded() { sessionStorage.setItem('evolv.reloadAt', String(Date.now())); }
+
 /* ---------------- shell hot-reload (genome recompile) ---------------- */
 const SHELL_FILES = new Set(['workspace/ui/index.html', 'workspace/ui/app.js']);
 function onFsChange(ch, evTime) {
   const rel = ch.path.replace(/\\/g, '/');
+  onWbFsChange(ch); // the workbench watches the project live
   // replayed/stale events must not trigger recompiles: only react to fresh
   // writes and renames (boot-time 'create' storms are how the genome seeds)
   const age = Date.now() - new Date(evTime).getTime();
@@ -160,11 +178,13 @@ function onFsChange(ch, evTime) {
     return;
   }
   if (fresh && SHELL_FILES.has(rel)) {
-    // the organism rewrote its own shell — recompile visibly, then hot-swap
+    // the organism rewrote its own shell — recompile visibly, then hot-swap.
+    // Same loop guard: shell writes can arrive in bursts; reload once.
+    if (shellReloadGuarded()) return;
     $('#recompile-path').textContent = ch.path;
     $('#recompile').classList.add('show');
     clearTimeout(state.shellReloadTimer);
-    state.shellReloadTimer = setTimeout(() => location.reload(), 900);
+    state.shellReloadTimer = setTimeout(() => { markShellReloaded(); location.reload(); }, 900);
     return;
   }
   if (ch.zone === 'components' && ch.path.endsWith('.html')) {
@@ -911,6 +931,23 @@ async function loadMind() {
   } catch {}
 }
 
+/* ---------------- creation library + live pinned widgets ---------------- */
+const CREATION_ICON = { widget:'🧩', tool:'🔧', skill:'🧠', plugin:'🔌', prompt:'✍️' };
+function seenCreations(){try{return new Set(JSON.parse(localStorage.getItem('evolv.creations.seen')||'[]'))}catch{return new Set()}}
+function markCreationsSeen(){localStorage.setItem('evolv.creations.seen',JSON.stringify(state.creations.map(c=>c.id)));$('#library-badge').hidden=true;$('#inbox-count').textContent='0'}
+async function loadCreationLibrary(){try{const d=await fetch('/api/creations').then(r=>r.json());state.creations=d.creations||[];state.creationHistory=d.evolution||[];const unseen=state.creations.filter(c=>!seenCreations().has(c.id));$('#library-count').textContent=state.creations.length;$('#inbox-count').textContent=unseen.length;$('#library-badge').hidden=!unseen.length;$('#library-badge').textContent=unseen.length||'';await renderPinnedCreations();renderCreationLibrary()}catch{toast('⚠️ creation library could not be loaded')}}
+async function renderPinnedCreations(){const panel=$('#pinned-sec'),list=$('#pinned-widget-list');if(!panel||!list)return;const pinned=state.creations.filter(c=>c.pinned&&!c.archived);panel.hidden=!pinned.length;$('#pinned-count').textContent=pinned.length;list.innerHTML='';for(const c of pinned){const item=document.createElement('article');item.className=`pinned-sidebar-card${c.enabled?'':' disabled'}`;item.dataset.id=c.id;item.innerHTML=`<header><button class="pinned-open"><span>${CREATION_ICON[c.type]||'◇'}</span><b>${escapeHtml(c.name)}</b><small>${escapeHtml(c.type)}</small></button><button class="pinned-remove" title="Unpin">×</button></header><div class="pinned-widget-body"></div>`;item.querySelector('.pinned-open').onclick=()=>{openGenome();setTimeout(()=>openGenomeFile(c.path.replace(/^workspace\//,'')),80)};item.querySelector('.pinned-remove').onclick=()=>creationAction(c,'pin');list.appendChild(item);const body=item.querySelector('.pinned-widget-body');if(c.type==='widget'&&c.enabled){const html=state.mounted.get(c.name)||await fetchOrganHTML(c.name);if(html!=null)graftOrgan(body,html)}else if(c.type==='widget'){body.innerHTML='<button class="pinned-enable">Enable live widget</button>';body.querySelector('button').onclick=()=>creationAction(c,'enable')}else body.innerHTML='<p class="pinned-widget-note">Pinned creation · click its title to inspect source.</p>'}}
+function creationCard(c){const el=document.createElement('article');el.className=`creation-card${c.pinned?' pinned':''}${c.archived?' archived':''}`;const age=new Date(c.updated).toLocaleDateString([],{month:'short',day:'numeric'});el.innerHTML=`<div class="creation-card-head"><span class="creation-icon">${CREATION_ICON[c.type]||'◇'}</span><div><h3>${escapeHtml(c.name)}</h3><span>${escapeHtml(c.type)} · ${age}</span></div><i class="creation-health ${c.status}"></i></div><div class="creation-meta"><code>${escapeHtml(c.hash.slice(7,19))}</code><span>${Math.max(1,Math.round(c.bytes/1024))} KB</span>${c.pinned?'<b>PINNED</b>':''}${!c.enabled?'<b>OFF</b>':''}</div><div class="creation-actions">${c.type==='widget'?`<button data-act="enable">${c.enabled?'Disable':'Enable'}</button>`:''}<button data-act="pin">${c.pinned?'Unpin':'Pin'}</button><button data-act="source">Source</button><button data-act="archive">${c.archived?'Restore':'Archive'}</button></div>`;el.querySelectorAll('[data-act]').forEach(b=>b.onclick=()=>creationAction(c,b.dataset.act));return el}
+async function creationAction(c,action){if(action==='source'){closeCreationLibrary();openGenome();setTimeout(()=>openGenomeFile(c.path.replace(/^workspace\//,'')),80);return}const value=action==='enable'?!c.enabled:action==='pin'?!c.pinned:!c.archived;const r=await fetch('/api/creations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:c.id,action,value})});if(!r.ok){toast('⚠️ creation state could not be saved');return}await loadCreationLibrary()}
+function renderCreationLibrary(){if(!$('#library-grid'))return;const q=$('#library-search').value.trim().toLowerCase(),type=$('#library-type').value,filter=$('#library-state').value;let items=state.creations.filter(c=>(!q||`${c.name} ${c.type} ${c.path}`.toLowerCase().includes(q))&&(type==='all'||c.type===type));items=items.filter(c=>filter==='all'||filter==='active'&&!c.archived||filter==='pinned'&&c.pinned||filter==='disabled'&&!c.enabled||filter==='archived'&&c.archived);items.sort((a,b)=>Number(b.pinned)-Number(a.pinned)||new Date(b.updated)-new Date(a.updated));const grid=$('#library-grid');grid.innerHTML='';items.forEach(c=>grid.appendChild(creationCard(c)));if(!items.length)grid.innerHTML='<div class="library-empty">No creations match this view.</div>';const seen=seenCreations(),inbox=$('#library-inbox');inbox.innerHTML='';state.creations.filter(c=>!seen.has(c.id)).forEach(c=>inbox.appendChild(creationCard(c)));if(!inbox.children.length)inbox.innerHTML='<div class="library-empty">Inbox zero. New autonomous creations will wait here for review.</div>';renderCreationHistory()}
+function renderCreationHistory(){const host=$('#library-history');host.innerHTML='';const groups=[];for(const e of [...state.creationHistory].reverse()){const key=`${e.kind||'mutation'}:${e.name||''}`;let g=groups.find(x=>x.key===key&&Math.abs(new Date(x.time)-new Date(e.time))<120000);if(!g){g={key,kind:e.kind||'mutation',name:e.name||'',time:e.time,entries:[]};groups.push(g)}g.entries.push(e)}groups.slice(0,100).forEach(g=>{const row=document.createElement('details');row.className='evolution-group';row.innerHTML=`<summary><span>${CREATION_ICON[g.kind]||'◇'}</span><div><b>${escapeHtml(g.name||g.kind)}</b><small>${g.entries.length} change${g.entries.length===1?'':'s'} · ${new Date(g.time).toLocaleString()}</small></div><em>${escapeHtml(g.kind)}</em></summary><div>${g.entries.map(e=>`<p>${escapeHtml(e.description||e.kind||'mutation')}</p>`).join('')}</div>`;host.appendChild(row)})}
+function setLibraryTab(tab){state.libraryTab=tab;document.querySelectorAll('[data-library-tab]').forEach(b=>b.classList.toggle('active',b.dataset.libraryTab===tab));$('#library-grid').hidden=tab!=='library';$('#library-inbox').hidden=tab!=='inbox';$('#library-history').hidden=tab!=='history';$('[data-library-toolbar]').hidden=tab!=='library';if(tab==='inbox')markCreationsSeen()}
+async function openCreationLibrary(){$('#library-modal').classList.add('open');$('#library-modal').setAttribute('aria-hidden','false');await loadCreationLibrary();$('#library-search').focus()}
+function closeCreationLibrary(){$('#library-modal').classList.remove('open');$('#library-modal').setAttribute('aria-hidden','true')}
+
+function openHologram(){const h=$('#hologram'),frame=$('#hologram-frame');h.hidden=false;if(!frame.src)frame.src=frame.dataset.src;document.body.classList.add('hologram-open')}
+function closeHologram(){$('#hologram').hidden=true;document.body.classList.remove('hologram-open');$('#btn-dna').focus()}
+
 /* ---------------- genome inspector (watch the body, live) ---------------- */
 let genomeOpen = false, genomeFile = null, genomeDirty = false;
 
@@ -1103,6 +1140,7 @@ window.addEventListener('DOMContentLoaded', () => {
   loadEvolutionHistory();
   loadMind();
   loadPlan();
+  loadCreationLibrary();
 
   // restore panel state — phones start with the sidebar folded away
   setSidebar(localStorage.getItem('evolv.sb') === '1' || isNarrow());
@@ -1140,6 +1178,16 @@ window.addEventListener('DOMContentLoaded', () => {
     try { await fetch('/api/dream', { method: 'POST' }); } catch { toast('⚠️ could not start dream'); }
   });
   $('#btn-files').addEventListener('click', openGenome);
+  $('#btn-library').addEventListener('click', openCreationLibrary);
+  $('#btn-library-close').addEventListener('click', closeCreationLibrary);
+  $('#library-modal').addEventListener('click',e=>{if(e.target.id==='library-modal')closeCreationLibrary()});
+  document.querySelectorAll('[data-library-tab]').forEach(b=>b.addEventListener('click',()=>setLibraryTab(b.dataset.libraryTab)));
+  $('#library-search').addEventListener('input',renderCreationLibrary);
+  $('#library-type').addEventListener('change',renderCreationLibrary);
+  $('#library-state').addEventListener('change',renderCreationLibrary);
+  $('#btn-dna').addEventListener('click',openHologram);
+  $('#btn-dna-close').addEventListener('click',closeHologram);
+  $('#hologram').addEventListener('click',e=>{if(e.target.id==='hologram')closeHologram()});
   $('#btn-snap-diff').addEventListener('click', openDiff);
   $('#btn-diff-close').addEventListener('click', closeDiff);
   $('#btn-diff-run').addEventListener('click', runDiff);
@@ -1266,7 +1314,7 @@ function showWelcome() {
   const w = el('div', '');
   w.id = 'welcome';
   w.innerHTML = `
-    <div class="w-mark">E</div>
+    <div class="w-mark evolv-mark" role="img" aria-label="EVOLV evolving emblem"><svg viewBox="0 0 64 64" aria-hidden="true"><circle class="em-orbit em-orbit-outer" cx="32" cy="32" r="25"/><circle class="em-orbit em-orbit-inner" cx="32" cy="32" r="19"/><path class="em-core em-core-one" d="M32 11 49 32 32 53 15 32Z"/><path class="em-core em-core-two" d="M32 14 46 22 46 42 32 50 18 42 18 22Z"/><path class="em-core em-core-three" d="M32 13 38 26 51 32 38 38 32 51 26 38 13 32 26 26Z"/><circle class="em-seed" cx="32" cy="32" r="5"/><circle class="em-satellite" cx="32" cy="7" r="3"/></svg></div>
     <h1>What should evolve today?</h1>
     <p class="w-sub">EVOLV is a workspace that rewrites itself — its UI, its tools, its mind — and works on your code anywhere on this machine.</p>
     <div class="w-grid">
@@ -1284,3 +1332,345 @@ function hideWelcome() {
 }
 
 // (the empty-state welcome replaced the injected greeting — no fake first message)
+
+/* ================= WORKBENCH — a real dev environment for the user's project =================
+The genome inspector edits the organism's own body; the workbench opens the
+user's bound project (config.project_dir, or organism home when unbound).
+Lazy file tree, in-place text editor with ctrl+s, new file/dir, rename,
+delete — every write lands on real disk and publishes fs:change, so the
+organism FEELS the workbench editing its host project live. */
+
+let wbOpenFlag = false;
+let wbExpanded = new Set();   // dir paths currently expanded
+let wbSelected = null;        // selected tree row path (dir or file)
+let wbFile = null;            // file open in the editor
+let wbDirty = false;
+let wbRootName = '';
+
+async function openWorkbench() {
+  wbOpenFlag = true;
+  $('#wb-modal').classList.add('show');
+  try {
+    const r = await fetch('/api/wb/root');
+    const j = await r.json();
+    wbRootName = j.name || 'project';
+    $('#wb-root-name').textContent = wbRootName;
+    $('#wb-root-files').textContent = j.files != null ? ` · ${j.files} files` : '';
+  } catch { $('#wb-root-name').textContent = 'unreachable'; }
+  refreshWbTree();
+}
+function closeWorkbench() {
+  if (wbDirty && !confirm('unsaved edits will be lost — close anyway?')) return;
+  wbOpenFlag = false;
+  wbDirty = false;
+  $('#wb-dirty').hidden = true;
+  $('#wb-modal').classList.remove('show');
+}
+
+async function refreshWbTree() {
+  const box = $('#wb-tree');
+  box.innerHTML = '<div class="wb-loading">loading project…</div>';
+  try {
+    const r = await fetch('/api/wb/tree?open=1&depth=2');
+    const j = await r.json();
+    box.innerHTML = '';
+    if (!j.entries || !j.entries.length) {
+      box.innerHTML = '<div class="wb-loading">empty project — hit "＋ file" to create the first one</div>';
+      return;
+    }
+    box.appendChild(buildWbLevel(j.entries));
+  } catch { box.innerHTML = '<div class="wb-loading">⚠️ could not list the project</div>'; }
+}
+
+// build one nested <ul> of entries; dirs already carrying kids render open
+function buildWbLevel(entries) {
+  const ul = document.createElement('ul');
+  ul.className = 'wb-ul';
+  for (const e of entries) {
+    const li = document.createElement('li');
+    li.className = 'wb-row' + (e.dir ? ' is-dir' : ' is-file') + (wbSelected === e.path ? ' sel' : '');
+    li.dataset.path = e.path;
+    const icon = wbIcon(e.name, e.dir);
+    const arrow = e.dir ? '<span class="wb-arrow">' + (e.open || wbExpanded.has(e.path) ? '▾' : '▸') + '</span>' : '<span class="wb-arrow"></span>';
+    li.innerHTML = `${arrow}<span class="wb-ico">${icon}</span><span class="wb-name">${escapeHtml(e.name)}</span>` +
+      (e.dir ? '' : `<span class="wb-size">${fmtSize(e.size)}</span>`);
+    li.title = e.path;
+    if (e.dir) {
+      li.addEventListener('click', (ev) => { ev.stopPropagation(); toggleWbDir(li, e); });
+      li.addEventListener('dblclick', (ev) => { ev.stopPropagation(); toggleWbDir(li, e); });
+      li.addEventListener('contextmenu', (ev) => { ev.preventDefault(); ev.stopPropagation(); wbSelected = e.path; wbDirMenu(e); });
+    } else {
+      li.addEventListener('click', (ev) => { ev.stopPropagation(); wbSelected = e.path; openWbFile(e.path); });
+      li.addEventListener('contextmenu', (ev) => { ev.preventDefault(); ev.stopPropagation(); wbSelected = e.path; wbFileMenu(e); });
+    }
+    ul.appendChild(li);
+    // nested kids: either preloaded from the server or expanded on demand
+    const kidBox = document.createElement('li');
+    kidBox.className = 'wb-kids';
+    kidBox.dataset.kidsof = e.path;
+    ul.appendChild(kidBox);
+    if (e.dir && (e.open || wbExpanded.has(e.path))) {
+      wbExpanded.add(e.path);
+      li.querySelector('.wb-arrow').textContent = '▾';
+      if (e.kids && e.kids.length) kidBox.appendChild(buildWbLevel(e.kids));
+      else if (e.kids) kidBox.innerHTML = '<div class="wb-empty">(empty)</div>';
+      else loadWbKids(kidBox, e.path);
+    }
+  }
+  return ul;
+}
+
+async function loadWbKids(box, dirPath) {
+  box.innerHTML = '<div class="wb-loading">…</div>';
+  try {
+    const r = await fetch('/api/wb/tree?path=' + encodeURIComponent(dirPath) + '&open=1&depth=1');
+    const j = await r.json();
+    box.innerHTML = '';
+    if (!j.entries || !j.entries.length) { box.innerHTML = '<div class="wb-empty">(empty)</div>'; return; }
+    box.appendChild(buildWbLevel(j.entries));
+  } catch { box.innerHTML = '<div class="wb-empty">⚠️</div>'; }
+}
+
+function toggleWbDir(li, e) {
+  const box = li.parentElement.querySelector(`[data-kidsof="${CSS.escape(e.path)}"]`);
+  if (!box) return;
+  if (wbExpanded.has(e.path)) {
+    wbExpanded.delete(e.path);
+    box.innerHTML = '';
+    li.querySelector('.wb-arrow').textContent = '▸';
+    li.classList.remove('sel');
+  } else {
+    wbExpanded.add(e.path);
+    wbSelected = e.path;
+    li.querySelector('.wb-arrow').textContent = '▾';
+    loadWbKids(box, e.path);
+  }
+}
+
+function wbIcon(name, isDir) {
+  if (isDir) return '📁';
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const map = { js:'🟨', ts:'🟦', go:'🐹', py:'🐍', rs:'🦀', html:'🌐', css:'🎨', json:'🧾', md:'📝',
+    txt:'📄', sh:'🐚', yml:'⚙️', yaml:'⚙️', toml:'⚙️', mod:'🐹', sum:'🐹', png:'🖼', jpg:'🖼',
+    svg:'🖼', gif:'🖼', lock:'🔒', env:'🔑', gitignore:'🙈', csv:'📊', sql:'🗄' };
+  return map[ext] || '📄';
+}
+function fmtSize(n) {
+  if (n == null) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' K';
+  return (n / 1048576).toFixed(1) + ' M';
+}
+
+async function openWbFile(path) {
+  try {
+    const r = await fetch('/api/wb/read?path=' + encodeURIComponent(path));
+    const j = await r.json();
+    if (!j.ok) { toast('⚠️ ' + escapeHtml(j.error || 'could not open')); return; }
+    wbFile = path;
+    wbDirty = false;
+    $('#wb-editor').value = j.content;
+    $('#wb-open-path').textContent = path;
+    $('#wb-dirty').hidden = true;
+    $('#btn-wb-del').hidden = false;
+    $('#btn-wb-rename').hidden = false;
+    updateWbStats();
+    document.querySelectorAll('.wb-row.sel').forEach((n) => n.classList.remove('sel'));
+    const row = [...document.querySelectorAll('.wb-row')].find((n) => n.dataset.path === path);
+    if (row) row.classList.add('sel');
+  } catch { toast('⚠️ could not open file'); }
+}
+
+function updateWbStats() {
+  const v = $('#wb-editor').value;
+  const lines = v ? v.split('\n').length : 0;
+  $('#wb-stats').textContent = `${fmtSize(v.length)} · ${lines} lines`;
+}
+
+function markWbDirty() {
+  if (!wbDirty) { wbDirty = true; $('#wb-dirty').hidden = false; }
+  updateWbStats();
+}
+
+async function saveWbFile() {
+  if (!wbFile) { toast('open a file first — pick one from the tree'); return; }
+  try {
+    const r = await fetch('/api/wb/write', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: wbFile, content: $('#wb-editor').value }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      wbDirty = false;
+      $('#wb-dirty').hidden = true;
+      toast(`💾 <b>${escapeHtml(wbFile)}</b> written to disk`);
+    } else toast('⚠️ ' + escapeHtml(j.error || 'write failed'));
+  } catch { toast('⚠️ write failed'); }
+}
+
+function wbUniqueName(base, siblings) {
+  if (!siblings.has(base)) return base;
+  const dot = base.lastIndexOf('.');
+  const stem = dot > 0 ? base.slice(0, dot) : base;
+  const ext = dot > 0 ? base.slice(dot) : '';
+  for (let i = 2; ; i++) if (!siblings.has(stem + '-' + i + ext)) return stem + '-' + i + ext;
+}
+
+async function wbSiblingNames(dirPath) {
+  try {
+    const r = await fetch('/api/wb/tree?path=' + encodeURIComponent(dirPath));
+    const j = await r.json();
+    return new Set((j.entries || []).map((e) => e.name));
+  } catch { return new Set(); }
+}
+
+$('#btn-wb-newfile').addEventListener('click', async () => {
+  const dir = wbSelected && !wbSelected.includes('.') ? wbSelected : '';
+  const names = await wbSiblingNames(dir);
+  const name = wbUniqueName('new-file.txt', names);
+  const path = dir ? dir + '/' + name : name;
+  await fetch('/api/wb/write', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content: '' }) });
+  wbExpanded.add(dir);
+  refreshWbTree();
+  openWbFile(path);
+  $('#wb-editor').focus();
+  toast(`📄 <b>${escapeHtml(path)}</b> created — type away`);
+});
+
+$('#btn-wb-newdir').addEventListener('click', async () => {
+  const dir = wbSelected && !wbSelected.includes('.') ? wbSelected : '';
+  const names = await wbSiblingNames(dir);
+  const name = wbUniqueName('new-dir', names);
+  const path = dir ? dir + '/' + name : name;
+  await fetch('/api/wb/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }) });
+  wbExpanded.add(dir);
+  refreshWbTree();
+  toast(`📁 <b>${escapeHtml(path)}</b> created`);
+});
+
+$('#btn-wb-refresh').addEventListener('click', refreshWbTree);
+$('#btn-wb-close').addEventListener('click', closeWorkbench);
+$('#wb-modal').addEventListener('click', (e) => { if (e.target.id === 'wb-modal') closeWorkbench(); });
+$('#btn-wb-save').addEventListener('click', saveWbFile);
+$('#wb-editor').addEventListener('input', markWbDirty);
+$('#wb-editor').addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveWbFile(); }
+  if (e.key === 'Tab') { // tab inserts two spaces, never steals focus
+    e.preventDefault();
+    const ta = e.target, s0 = ta.selectionStart, s1 = ta.selectionEnd;
+    ta.value = ta.value.slice(0, s0) + '  ' + ta.value.slice(s1);
+    ta.selectionStart = ta.selectionEnd = s0 + 2;
+    markWbDirty();
+  }
+  e.stopPropagation(); // don't fire global shortcuts while typing
+});
+
+$('#btn-wb-del').addEventListener('click', async () => {
+  if (!wbFile || !confirm(`delete ${wbFile} from your project? This cannot be undone.`)) return;
+  const r = await fetch('/api/wb/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: wbFile }) });
+  const j = await r.json();
+  if (j.ok) {
+    toast(`💥 <b>${escapeHtml(wbFile)}</b> deleted`);
+    wbFile = null; wbDirty = false;
+    $('#wb-editor').value = '';
+    $('#wb-open-path').textContent = 'pick a file — the workbench edits your project in place';
+    $('#wb-dirty').hidden = true;
+    $('#btn-wb-del').hidden = true;
+    $('#btn-wb-rename').hidden = true;
+    refreshWbTree();
+  } else toast('⚠️ ' + escapeHtml(j.error || 'delete failed'));
+});
+
+$('#btn-wb-rename').addEventListener('click', async () => {
+  if (!wbFile) return;
+  const to = prompt('rename / move to (project-relative path):', wbFile);
+  if (!to || to === wbFile) return;
+  const r = await fetch('/api/wb/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: wbFile, to }) });
+  const j = await r.json();
+  if (j.ok) { toast(`✎ <b>${escapeHtml(wbFile)}</b> → <b>${escapeHtml(to)}</b>`); wbFile = to; refreshWbTree(); openWbFile(to); }
+  else toast('⚠️ ' + escapeHtml(j.error || 'rename failed'));
+});
+
+function wbFileMenu(e) {
+  wbSelected = e.path;
+  if (confirm(`file: ${e.path}\n\nOK = open · Cancel = stay`)) openWbFile(e.path);
+}
+function wbDirMenu(e) {
+  wbSelected = e.path;
+  const act = prompt(`folder: ${e.path}\n\nType: open / collapse / newfile / newdir / delete`, 'open');
+  if (!act) return;
+  if (act === 'open') { if (!wbExpanded.has(e.path)) toggleWbDir([...document.querySelectorAll('.wb-row')].find((n) => n.dataset.path === e.path), e); }
+  else if (act === 'collapse') { if (wbExpanded.has(e.path)) toggleWbDir([...document.querySelectorAll('.wb-row')].find((n) => n.dataset.path === e.path), e); }
+  else if (act === 'newfile') $('#btn-wb-newfile').click();
+  else if (act === 'newdir') $('#btn-wb-newdir').click();
+  else if (act === 'delete') {
+    if (!confirm(`delete folder ${e.path}? It must be empty.`)) return;
+    fetch('/api/wb/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: e.path }) })
+      .then((r) => r.json()).then((j) => { if (j.ok) { toast(`💥 <b>${escapeHtml(e.path)}</b> deleted`); refreshWbTree(); } else toast('⚠️ ' + escapeHtml(j.error || 'delete failed')); });
+  }
+}
+
+// the workbench watches the project live too: any fs:change under the root
+// refreshes the open tree (unless the change came from our own save, which
+// the editor already reflects)
+let wbRefreshTimer = null;
+function onWbFsChange(ch) {
+  if (!wbOpenFlag) return;
+  const src = (ch || {}).source;
+  if (src === 'workbench') return; // our own writes are already on screen
+  clearTimeout(wbRefreshTimer);
+  wbRefreshTimer = setTimeout(refreshWbTree, 600); // coalesce bursts
+}
+
+$('#btn-workbench').addEventListener('click', openWorkbench);
+
+/* ---- workbench project-wide search ---- */
+let wbSearchTimer = null;
+$('#wb-search').addEventListener('input', () => {
+  clearTimeout(wbSearchTimer);
+  wbSearchTimer = setTimeout(runWbSearch, 250);
+});
+$('#wb-search').addEventListener('keydown', (e) => {
+  e.stopPropagation();
+  if (e.key === 'Escape') { e.target.value = ''; $('#wb-results').hidden = true; $('#wb-results').innerHTML = ''; }
+});
+
+async function runWbSearch() {
+  const q = $('#wb-search').value.trim();
+  const box = $('#wb-results');
+  if (!q) { box.hidden = true; box.innerHTML = ''; return; }
+  try {
+    const r = await fetch('/api/wb/search?q=' + encodeURIComponent(q));
+    const j = await r.json();
+    if (!j.ok) { box.hidden = false; box.innerHTML = '<div class="wb-empty">⚠️ ' + escapeHtml(j.error || 'search failed') + '</div>'; return; }
+    box.hidden = false;
+    if (!j.hits.length) { box.innerHTML = `<div class="wb-empty">no matches for "${escapeHtml(q)}" in ${j.files} files</div>`; return; }
+    const head = `<div class="wb-res-head">${j.hits.length}${j.truncated ? '+' : ''} matches in ${j.files} files${j.truncated ? ' (showing first 200)' : ''}</div>`;
+    box.innerHTML = head + j.hits.map((h) =>
+      `<button class="wb-res" data-path="${escapeHtml(h.path)}" data-line="${h.line}">` +
+      `<span class="wb-res-path">${escapeHtml(h.path)}:${h.line}</span> — ${escapeHtml(h.text.trim().slice(0, 120))}</button>`).join('');
+    box.querySelectorAll('.wb-res').forEach((b) => b.addEventListener('click', () => jumpWb(b.dataset.path, +b.dataset.line)));
+  } catch { box.hidden = false; box.innerHTML = '<div class="wb-empty">⚠️ search failed</div>'; }
+}
+
+// open a file and put the caret on the matching line (and flash it)
+async function jumpWb(path, line) {
+  await openWbFile(path);
+  const ta = $('#wb-editor');
+  const lines = ta.value.split('\n');
+  if (line < 1 || line > lines.length) return;
+  let pos = 0;
+  for (let i = 0; i < line - 1; i++) pos += lines[i].length + 1;
+  ta.focus();
+  ta.selectionStart = pos;
+  ta.selectionEnd = pos + lines[line - 1].length;
+  // scroll the caret into view
+  const lh = parseFloat(getComputedStyle(ta).lineHeight) || 20;
+  ta.scrollTop = Math.max(0, (line - 6) * lh);
+  ta.style.background = 'var(--accent-soft)';
+  setTimeout(() => { ta.style.background = ''; }, 500);
+}

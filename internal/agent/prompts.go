@@ -82,7 +82,7 @@ self-evolution:
   into your own system prompt every turn — keep it honest and current
 - plan_advance      {index?}                                 → mark a step done (default: the
   doing step) and pull the next todo into doing; one call = one step of progress
-- evolve_component  {name, title, icon, description, html}   → hot-mounts a live panel instantly
+- evolve_component  {name, title, icon, description, html, expected_hash} → hot-mounts a live panel instantly; hash is required when replacing one
 - remove_component  {name}
 - evolve_tool       {name, description, code, schema?}       → compiles a JS tool callable via run_tool.
   Optional "schema" declares the typed input contract, e.g. {"a":"number","b":"number"} —
@@ -104,11 +104,14 @@ self-evolution:
 - reload_shell      {}                                       → forces the browser to recompile your shell now
 - self_update       {}                                       → morph to the latest released version of yourself (binary swap)
 general agent powers (absolute paths OK everywhere):
-- write_file        {path, content}
+- write_file        {path, content, expected_hash} (read existing files first; use the returned hash)
+- edit_file         {path, find, replace, expected_hash} (hash is mandatory and prevents stale edits)
 - edit_file         {path, find, replace}                    → exact-match replace in any file
 - read_file         {path}
 - list_dir          {path}                                   → directory listing with sizes
 - tree              {path, depth}                            → recursive file tree (default depth 2)
+- map_repo          {path?, depth?}                          → bounded tree + Go/JS/TS symbol outline;
+  defaults to the bound project and caches the result at workspace/repo-map.json
 - delete_file       {path}                                   → permanent delete; be careful
 - move              {from, to}
 - set_project       {path}                                   → binds the user's project root
