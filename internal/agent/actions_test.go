@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -15,6 +16,9 @@ func testAgent(t *testing.T) *Agent {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// os.UserHomeDir reads USERPROFILE on Windows; set both so every test gets
+	// an isolated organism instead of touching the developer's real ~/.evolv.
+	t.Setenv("USERPROFILE", home)
 	ws, err := workspace.Load(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -79,8 +83,12 @@ func TestSetProjectAndShellCwd(t *testing.T) {
 	if res["ok"] != true || a.ws.Config.ProjectDir != proj {
 		t.Fatalf("set_project: %v", res)
 	}
-	res = execOK(t, a, action{Action: "shell", Command: "pwd"})
-	if res["output"] != proj+"\n" {
+	command := "pwd"
+	if runtime.GOOS == "windows" {
+		command = "cd"
+	}
+	res = execOK(t, a, action{Action: "shell", Command: command})
+	if !strings.EqualFold(strings.TrimSpace(res["output"].(string)), proj) {
 		t.Fatalf("shell cwd: %v", res)
 	}
 }

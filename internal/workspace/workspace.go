@@ -31,6 +31,7 @@ const (
 	ManifestFile  = "workspace/manifest.json"
 	EvolutionFile = "workspace/evolution.jsonl" // append-only mutation history
 	PlanFile      = "workspace/plan.json"       // the agent's current task plan
+	RepoMapFile   = "workspace/repo-map.json"   // cached repository tree + symbol outline
 )
 
 // Config is the user-editable kernel config.
@@ -131,9 +132,16 @@ var Version = "0.27.0"
 // Load opens (creating if needed) the workspace at ~/.evolv.
 // uiFS is the embedded factory genome used to seed on first run.
 func Load(uiFS fs.FS) (*W, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
+	// Honor HOME when explicitly set. Besides matching the conventional
+	// ~/.evolv contract, this lets callers and tests isolate an organism on
+	// Windows, where os.UserHomeDir otherwise ignores HOME.
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
 	}
 	w := &W{Root: filepath.Join(home, RootDir), uiFS: uiFS, Config: defaultConfig()}
 	if err := os.MkdirAll(w.Root, 0o755); err != nil {
